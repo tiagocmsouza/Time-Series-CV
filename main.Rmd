@@ -1,0 +1,49 @@
+---
+title: "Time Series CV"
+author: "Tiago Souza"
+date: "1/31/2022"
+output: slidy_presentation
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(tidymodels)
+
+library(httr)
+```
+
+## Step 1: Download data
+
+
+## Step 2: Define models
+
+Here we define a set of models and the names of their respective recipes. What defines one specification is a pair model-recipe. 
+
+```{r def_models, echo = TRUE}
+source("basic_workflows.R")
+
+models_def <- tribble(
+  ~model_id, ~recipe_id,
+  "workflow_lm", "recipe_basic",
+  "workflow_lm", "recipe_lag",
+  "workflow_xgb", "recipe_basic",
+  "workflow_xgb", "recipe_lag",
+  "workflow_rf", "recipe_basic",
+  "workflow_rf", "recipe_lag",
+  "workflow_svm", "recipe_basic",
+  "workflow_svm", "recipe_lag",
+) %>% 
+  
+  mutate(model = map(model_id, ~get(.x)))
+
+print(models_def)
+
+```
+
+## Step 3: Data
+
+Remember that a recipe is defined by an equation and a data set. Hence, before creating recipes, we must split the data.
+
+
