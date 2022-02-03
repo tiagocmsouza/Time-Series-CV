@@ -42,8 +42,7 @@ Notice below that codes appear as variable names, the first row of the data fram
 
 data_links <- list(
   manufacturing = "https://apisidra.ibge.gov.br/values/t/3653/v/3134/c544/129316/p/all/n1/all",
-  retail = "https://apisidra.ibge.gov.br/values/t/3417/v/1186/c11046/40312/p/all/n1/all",
-  services = "https://apisidra.ibge.gov.br/values/t/6442/v/8677/c11046/40312/p/all/n1/all")
+  retail = "https://apisidra.ibge.gov.br/values/t/3417/v/1186/c11046/40312/p/all/n1/all")
 
 download_data <- function(url) {
   data <- GET(url = url) %>% 
@@ -58,11 +57,24 @@ data <- map_dfr(data_links, download_data, .id = "variable") %>%
   transmute(
     variable = variable,
     date = ymd(paste0(D3C,"01")),
-    value = as.numeric(V)
-  )
+    value = as.numeric(V)) %>% 
+  
+  group_by(variable) %>% 
+  
+  mutate(value = value / lag(value, n=1)) %>% 
+  
+  drop_na() %>% 
+  
+  ungroup()
 
 print(data)
+
+data %>% 
+  ggplot(aes(x = date, y = value, color = variable)) + 
+  geom_line() + 
+  facet_grid(variable ~ .)
 ```
+
 
 ## Step 2: Define models
 
@@ -73,17 +85,17 @@ source("basic_workflows.R")
 
 models_def <- tribble(
   ~model_id, ~recipe_id,
-  "workflow_lm", "recipe_basic",
-  "workflow_lm", "recipe_lag",
-  "workflow_xgb", "recipe_basic",
-  "workflow_xgb", "recipe_lag",
-  "workflow_rf", "recipe_basic",
-  "workflow_rf", "recipe_lag",
-  "workflow_svm", "recipe_basic",
-  "workflow_svm", "recipe_lag",
+  "lm", "recipe_primary",
+  "xgb", "recipe_primary",
+  "rf", "recipe_primary",
+  "svm", "recipe_primary",
+  "lm", "recipe_lag",
+  "xgb", "recipe_lag",
+  "rf", "recipe_lag",
+  "svm", "recipe_lag"
 ) %>% 
   
-  mutate(model = map(model_id, ~get(.x)))
+  mutate(workflow = map(model_id, ~get(.x)))
 
 print(models_def)
 
@@ -104,7 +116,8 @@ data_complete <- data %>%
                                         .date_var = date,
                                         .length_out = forecast_length,
                                         .bind_data = TRUE)),
-    data_forecast = map(data_extended, ~ .x %>% filter(is.na(value))))
+    data_forecast = map(data_extended, ~ .x %>% filter(is.na(value)))
+    )
 
 print(data_complete)
 ```
@@ -135,3 +148,47 @@ print(data_splits)
 
 ## Step 5: Recipes
 
+Since a recipe is defined by a model and a data set, we define a function that will receive each component of a recipe and create it.
+
+We create 2 examples of recipes, based on a fixed column name with data ("value") and a fixed specification of lag structure (lag 1 and 12). Notice that the column "date" must be removed from the data in order to run.
+
+```{r}
+create_recipe <- function(data, recipe_id) {
+  
+  data <- tryCatch(training(data), 
+                   error = function(e) data)
+  
+  recipe_primary <- recipe(value ~ ., data = data) %>% 
+                      step_mutate(month = as_factor(month(date))) %>% 
+                      step_dummy(month, one_hot = FALSE) %>% 
+                      step_rm(date)
+  
+  recipe_lag <- recipe(value ~ ., data = data) %>% 
+                      step_mutate(month = as_factor(month(date))) %>% 
+                      step_dummy(month, one_hot = FALSE) %>% 
+                      step_lag(value, c(1,12)) %>% 
+                      step_naomit(all_predictors()) %>% 
+                      step_rm(date)
+  
+  return(get(recipe_id))
+  
+}
+```
+
+## Step 5: Complete tibble with all components
+
+```{r}
+models_components <- models_def %>% 
+  
+  expand_grid(data_splits) %>% 
+  
+  mutate(
+    recipe = map2(split, recipe_id, ~ create_recipe(.x, .y)),
+    workflow = map2(workflow, recipe, ~ .x %>% add_recipe(.y))#,
+    #fit = map2(workflow, split, ~ fit(.x, data = training(.y)))
+    )
+
+print(models_components)
+```
+
+  
