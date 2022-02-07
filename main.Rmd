@@ -11,7 +11,6 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(tidymodels)
 library(lubridate)
-library(magrittr)
 
 library(httr)
 library(timetk)
@@ -28,7 +27,7 @@ initial_periods <- 36
 # Maximum number of lags
 lag_max <- 12
 # Number of splits in output
-splits_number <- 10
+splits_number <- 20
 
 ```
 
@@ -39,7 +38,7 @@ In this example we will use Manufacturing production data from Brazil.
 
 Notice below that codes appear as variable names, the first row of the data frame contains information about the variables (not data itself), and all variables are character.
 
-```{r, data}
+```{r}
 
 data_links <- list(
   manufacturing = "https://apisidra.ibge.gov.br/values/t/3653/v/3134/c544/129316/p/all/n1/all",
@@ -62,7 +61,7 @@ data <- map_dfr(data_links, download_data, .id = "variable") %>%
   
   group_by(variable) %>% 
   
-  mutate(value = value / lag(value, n=1) - 1) %>% 
+  mutate(value = value / lag(value, n=1)) %>% 
   
   drop_na() %>% 
   
@@ -81,7 +80,7 @@ data %>%
 
 Here we define a set of models and the names of their respective recipes. What defines one specification is a pair model-recipe. 
 
-```{r def-models}
+```{r def_models}
 source("basic_workflows.R")
 
 models_def <- tribble(
@@ -98,14 +97,14 @@ models_def <- tribble(
   
   mutate(workflow = map(model_id, ~get(.x)))
 
-head(models_def)
+print(models_def)
 
 ```
 
 ## Step 3: Split Data - train/test
 
 Now we define train and test samples based on one year and create a data frame to store forecasts.
-```{r, data-split}
+```{r}
 data_complete <- data %>% 
   
   group_nest(variable) %>% 
@@ -126,7 +125,7 @@ print(data_complete)
 ## Step 4: Split Data - CV
 
 Remember that a recipe is defined by an equation and a data set. Hence, before creating recipes, we must split the training data.
-```{r, data-cv}
+```{r}
 data_splits <- data_complete %>% 
   
   transmute(
@@ -144,7 +143,7 @@ data_splits <- data_complete %>%
   rename(split_id = id, 
          split = splits)
 
-head(data_splits)
+print(data_splits)
 ```
 
 ## Step 5: Recipes
@@ -153,7 +152,7 @@ Since a recipe is defined by a model and a data set, we define a function that w
 
 We create 2 examples of recipes, based on a fixed column name with data ("value") and a fixed specification of lag structure (lag 1 and 12). Notice that the column "date" must be removed from the data in order to run.
 
-```{r, recipes}
+```{r}
 create_recipe <- function(data, recipe_id) {
   
   data <- tryCatch(training(data), 
@@ -167,7 +166,7 @@ create_recipe <- function(data, recipe_id) {
   recipe_lag <- recipe(value ~ ., data = data) %>% 
                       step_mutate(month = as_factor(month(date))) %>% 
                       step_dummy(month, one_hot = FALSE) %>% 
-                      step_lag(value, lag = c(1,12)) %>% 
+                      step_lag(value, c(1,12)) %>% 
                       step_naomit(all_predictors()) %>% 
                       step_rm(date)
   
@@ -178,142 +177,18 @@ create_recipe <- function(data, recipe_id) {
 
 ## Step 5: Complete tibble with all components
 
-```{r, models-components}
+```{r}
 models_components <- models_def %>% 
   
   expand_grid(data_splits) %>% 
   
   mutate(
     recipe = map2(split, recipe_id, ~ create_recipe(.x, .y)),
-    workflow = map2(workflow, recipe, ~ .x %>% add_recipe(.y))
-    ) %>% 
-  
-  select(-recipe)
-
-head(models_components)
-```
-
-## Step 6: Fitting models to all splits
-
-```{r, models-fit, cache=TRUE}
-models_fitted <- models_components %>% 
-  
-  mutate(fit = map2(workflow, split, ~ fit(.x, data = training(.y)))) %>% 
-  
-  select(-workflow)
-
-head(models_fitted)
-```
-## Step 7: Calibrated data for test sample
-
-```{r, data-calibr}
-data_calibr <- models_fitted %>% 
-  
-  mutate(
-    fitted_recipe = map(fit, ~ extract_recipe(.x)),
-    fitted_model = map(fit, ~ extract_fit_parsnip(.x)),
-    data = map(split, ~ testing(.x)),
-    data_test = map2(fitted_recipe, data, ~ bake(.x, .y)),
-    pred = map2(fitted_model, data_test, ~ predict(.x, new_data = .y %>% select(-value))),
-    across(c(data, pred), ~ map(.x, function(x) slice_tail(x, n = forecast_length))),
-    data = map2(data, pred, ~ .x %>% bind_cols(.y))
-  ) %>% 
-  
-  select(variable,
-         model_id,
-         recipe_id,
-         split_id,
-         data) %>% 
-  
-  unnest(data)
-
-head(data_calibr)
-```
-## Step 8: Error metrics
-
-```{r, forecast-errors}
-error_metrics <- data_calibr %>% 
-  
-  group_by(variable, model_id, recipe_id, split_id) %>% 
-  
-  metrics(value, .pred) %>% 
-  
-  group_by(variable, model_id, recipe_id, .metric) %>% 
-  
-  summarize(mean_error = mean(.estimate), .groups = "drop_last")
-
-head(error_metrics)
-```
-
-## Step 9: Best model
-
-The metric of choice will be "MAE".
-
-```{r, best-model}
-best_model <- error_metrics %>% 
-  
-  filter(.metric == "mae") %>% 
-  
-  group_by(variable) %>% 
-  
-  filter(mean_error == min(mean_error)) %>% 
-  
-  select(variable, model_id, recipe_id)
-
-head(best_model)
-```
-
-## Step 10: Refit best models
-
-```{r, refit-models}
-refit_models <- best_model %>% 
-  
-  left_join(data_complete, by = "variable") %>% 
-  
-  left_join(models_def, by = c("model_id", "recipe_id")) %>% 
-  
-  mutate(
-    recipe = map2(data, recipe_id, ~ create_recipe(.x, .y)),
-    workflow = map2(workflow, recipe, ~ .x %>% add_recipe(.y)),
-    fit = map2(workflow, data, ~ fit(.x, data = .y)),
-    fitted_recipe = map(fit, ~ extract_recipe(.x)),
-    fitted_model = map(fit, ~ extract_fit_parsnip(.x))
-  ) %>% 
-  
-  select(variable,
-         data_extended,
-         data_forecast,
-         fitted_recipe,
-         fitted_model) %>% 
-  
-  ungroup()
-
-head(refit_models)
-```
-
-## Step 11: Forecasts
-
-```{r, forecasts}
-check_forecast <- refit_models %>% 
-  
-  select(data_forecast) %>% 
-  
-  transmute(check = map(data_forecast, ~ .x %>% 
-                       select(value) %>% 
-                       anyNA()),
-            check = as.logical(check)) %>% 
-  
-  use_series(check) %>% 
-  
-  any()
-
-while(check_forecast) {
-  
-  forecast <- refit_models %>% 
-    
-    mutate(
-      x = 1
+    workflow = map2(workflow, recipe, ~ .x %>% add_recipe(.y))#,
+    #fit = map2(workflow, split, ~ fit(.x, data = training(.y)))
     )
-  check_forecast = FALSE
-}
+
+print(models_components)
 ```
+
+  
