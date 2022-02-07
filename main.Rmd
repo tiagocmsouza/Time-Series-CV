@@ -21,12 +21,13 @@ library(timetk)
 ```{r}
 # Number of periods to forecast
 forecast_length <- 20 
-# Year that ends training data
-year_limit_train <- 2018 
+# Number of periods in test sample
+test_size <- 24
 # Initial number of periods included in a split
 initial_periods <- 36
-# Maximum number of lags
-lag_max <- 12
+# Lags
+lag_vec <- c(1,12)
+lag_max <- max(lag_vec)
 # Number of splits in output
 splits_number <- 10
 
@@ -111,17 +112,27 @@ data_complete <- data %>%
   group_nest(variable) %>% 
   
   mutate(
-    data_train = map(data, ~ .x %>% filter(year(date) < year_limit_train)),
-    data_test = map(data, ~ .x %>% filter(year(date) >= year_limit_train)),
+    data_split = map(data, ~ .x %>% time_series_split(
+                                      date_var = date,
+                                      initial = initial_periods,
+                                      assess = test_size,
+                                      lag = lag_max,
+                                      cumulative = TRUE,
+                                      slice = 1)),
+    data_train = map(data_split, ~ .x %>% training()),
+    data_test = map(data_split, ~ .x %>% testing()),
     data_extended = map(data, ~ .x %>% future_frame(
                                         .date_var = date,
                                         .length_out = forecast_length,
                                         .bind_data = TRUE)),
     data_forecast = map(data_extended, ~ .x %>% filter(is.na(value)))
-    )
+    ) %>% 
+  
+  select(-data_split)
 
 print(data_complete)
 ```
+
 
 ## Step 4: Split Data - CV
 
@@ -167,7 +178,7 @@ create_recipe <- function(data, recipe_id) {
   recipe_lag <- recipe(value ~ ., data = data) %>% 
                       step_mutate(month = as_factor(month(date))) %>% 
                       step_dummy(month, one_hot = FALSE) %>% 
-                      step_lag(value, lag = c(1,12)) %>% 
+                      step_lag(value, lag = lag_vec) %>% 
                       step_naomit(all_predictors()) %>% 
                       step_rm(date)
   
@@ -273,9 +284,9 @@ refit_models <- best_model %>%
   left_join(models_def, by = c("model_id", "recipe_id")) %>% 
   
   mutate(
-    recipe = map2(data, recipe_id, ~ create_recipe(.x, .y)),
+    recipe = map2(data_train, recipe_id, ~ create_recipe(.x, .y)),
     workflow = map2(workflow, recipe, ~ .x %>% add_recipe(.y)),
-    fit = map2(workflow, data, ~ fit(.x, data = .y)),
+    fit = map2(workflow, data_train, ~ fit(.x, data = .y)),
     fitted_recipe = map(fit, ~ extract_recipe(.x)),
     fitted_model = map(fit, ~ extract_fit_parsnip(.x))
   ) %>% 
@@ -290,6 +301,13 @@ refit_models <- best_model %>%
 
 head(refit_models)
 ```
+
+## Step 11: Performance with respect to test data
+
+```{r, performance-test}
+
+```
+
 
 ## Step 11: Forecasts
 

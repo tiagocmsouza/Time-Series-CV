@@ -175,12 +175,13 @@ pre code {
 <h2>Step 0: Parameters</h2>
 <pre class="r"><code># Number of periods to forecast
 forecast_length &lt;- 20 
-# Year that ends training data
-year_limit_train &lt;- 2018 
+# Number of periods in test sample
+test_size &lt;- 24
 # Initial number of periods included in a split
 initial_periods &lt;- 36
-# Maximum number of lags
-lag_max &lt;- 12
+# Lags
+lag_vec &lt;- c(1,12)
+lag_max &lt;- max(lag_vec)
 # Number of splits in output
 splits_number &lt;- 10</code></pre>
 </div>
@@ -274,14 +275,23 @@ head(models_def)</code></pre>
   group_nest(variable) %&gt;% 
   
   mutate(
-    data_train = map(data, ~ .x %&gt;% filter(year(date) &lt; year_limit_train)),
-    data_test = map(data, ~ .x %&gt;% filter(year(date) &gt;= year_limit_train)),
+    data_split = map(data, ~ .x %&gt;% time_series_split(
+                                      date_var = date,
+                                      initial = initial_periods,
+                                      assess = test_size,
+                                      lag = lag_max,
+                                      cumulative = TRUE,
+                                      slice = 1)),
+    data_train = map(data_split, ~ .x %&gt;% training()),
+    data_test = map(data_split, ~ .x %&gt;% testing()),
     data_extended = map(data, ~ .x %&gt;% future_frame(
                                         .date_var = date,
                                         .length_out = forecast_length,
                                         .bind_data = TRUE)),
     data_forecast = map(data_extended, ~ .x %&gt;% filter(is.na(value)))
-    )
+    ) %&gt;% 
+  
+  select(-data_split)
 
 print(data_complete)</code></pre>
 <pre><code>## # A tibble: 2 × 6
@@ -314,12 +324,12 @@ head(data_splits)</code></pre>
 <pre><code>## # A tibble: 6 × 3
 ##   variable      split            split_id
 ##   &lt;chr&gt;         &lt;list&gt;           &lt;chr&gt;   
-## 1 manufacturing &lt;split [171/32]&gt; Slice01 
-## 2 manufacturing &lt;split [170/32]&gt; Slice02 
-## 3 manufacturing &lt;split [169/32]&gt; Slice03 
-## 4 manufacturing &lt;split [168/32]&gt; Slice04 
-## 5 manufacturing &lt;split [167/32]&gt; Slice05 
-## 6 manufacturing &lt;split [166/32]&gt; Slice06</code></pre>
+## 1 manufacturing &lt;split [195/32]&gt; Slice01 
+## 2 manufacturing &lt;split [194/32]&gt; Slice02 
+## 3 manufacturing &lt;split [193/32]&gt; Slice03 
+## 4 manufacturing &lt;split [192/32]&gt; Slice04 
+## 5 manufacturing &lt;split [191/32]&gt; Slice05 
+## 6 manufacturing &lt;split [190/32]&gt; Slice06</code></pre>
 </div>
 <div id="step-5-recipes" class="section level2">
 <h2>Step 5: Recipes</h2>
@@ -338,7 +348,7 @@ head(data_splits)</code></pre>
   recipe_lag &lt;- recipe(value ~ ., data = data) %&gt;% 
                       step_mutate(month = as_factor(month(date))) %&gt;% 
                       step_dummy(month, one_hot = FALSE) %&gt;% 
-                      step_lag(value, lag = c(1,12)) %&gt;% 
+                      step_lag(value, lag = lag_vec) %&gt;% 
                       step_naomit(all_predictors()) %&gt;% 
                       step_rm(date)
   
@@ -363,12 +373,12 @@ head(models_components)</code></pre>
 <pre><code>## # A tibble: 6 × 6
 ##   model_id recipe_id      workflow   variable      split            split_id
 ##   &lt;chr&gt;    &lt;chr&gt;          &lt;list&gt;     &lt;chr&gt;         &lt;list&gt;           &lt;chr&gt;   
-## 1 lm       recipe_primary &lt;workflow&gt; manufacturing &lt;split [171/32]&gt; Slice01 
-## 2 lm       recipe_primary &lt;workflow&gt; manufacturing &lt;split [170/32]&gt; Slice02 
-## 3 lm       recipe_primary &lt;workflow&gt; manufacturing &lt;split [169/32]&gt; Slice03 
-## 4 lm       recipe_primary &lt;workflow&gt; manufacturing &lt;split [168/32]&gt; Slice04 
-## 5 lm       recipe_primary &lt;workflow&gt; manufacturing &lt;split [167/32]&gt; Slice05 
-## 6 lm       recipe_primary &lt;workflow&gt; manufacturing &lt;split [166/32]&gt; Slice06</code></pre>
+## 1 lm       recipe_primary &lt;workflow&gt; manufacturing &lt;split [195/32]&gt; Slice01 
+## 2 lm       recipe_primary &lt;workflow&gt; manufacturing &lt;split [194/32]&gt; Slice02 
+## 3 lm       recipe_primary &lt;workflow&gt; manufacturing &lt;split [193/32]&gt; Slice03 
+## 4 lm       recipe_primary &lt;workflow&gt; manufacturing &lt;split [192/32]&gt; Slice04 
+## 5 lm       recipe_primary &lt;workflow&gt; manufacturing &lt;split [191/32]&gt; Slice05 
+## 6 lm       recipe_primary &lt;workflow&gt; manufacturing &lt;split [190/32]&gt; Slice06</code></pre>
 </div>
 <div id="step-6-fitting-models-to-all-splits" class="section level2">
 <h2>Step 6: Fitting models to all splits</h2>
