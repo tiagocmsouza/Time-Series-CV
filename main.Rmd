@@ -291,12 +291,6 @@ refit_models <- best_model %>%
     fitted_model = map(fit, ~ extract_fit_parsnip(.x))
   ) %>% 
   
-  select(variable,
-         data_extended,
-         data_forecast,
-         fitted_recipe,
-         fitted_model) %>% 
-  
   ungroup()
 
 head(refit_models)
@@ -305,11 +299,42 @@ head(refit_models)
 ## Step 11: Performance with respect to test data
 
 ```{r, performance-test}
+data_perf <- refit_models %>% 
+  
+  select(variable,
+         data_test,
+         fitted_recipe,
+         fitted_model) %>% 
+  
+  mutate(
+    data_test = map2(fitted_recipe, data_test, ~ bake(.x, .y)),
+    pred = map2(fitted_model, data_test, ~ predict(.x, new_data = .y %>% select(-value))),
+    across(c(data_test, pred), ~ map(.x, function(x) slice_tail(x, n = forecast_length))),
+    data_test = map2(data_test, pred, ~ .x %>% select(value) %>%  bind_cols(.y))
+  ) %>% 
+  
+  select(
+    variable,
+    data_test
+  ) %>% 
+  
+  unnest(data_test)
 
+head(data_perf)
+```
+```{r, chart-performance}
+data_perf %>% 
+  
+  ggplot(aes(x=value, y=.pred))+
+    geom_point()+ 
+    geom_smooth(method = "lm", formula = y ~ x)+
+    facet_grid(variable ~ .)
 ```
 
 
 ## Step 11: Forecasts
+
+Now we turn to forecasting the future, and for that we will need a recursive approach. This is needed since to forecast $n$ periods ahead, given the existence of lag variables in the models, it is needed to have the forecast for the $n-1$ previous periods.
 
 ```{r, forecasts}
 check_forecast <- refit_models %>% 
