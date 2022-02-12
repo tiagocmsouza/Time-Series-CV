@@ -337,7 +337,9 @@ data_perf %>%
 Now we turn to forecasting the future, and for that we will need a recursive approach. This is needed since to forecast $n$ periods ahead, given the existence of lag variables in the models, it is needed to have the forecast for the $n-1$ previous periods.
 
 ```{r, forecasts}
-check_forecast <- refit_models %>% 
+check_forecast <- function(df_refit) {
+  
+  check <- df_refit %>% 
   
   select(data_forecast) %>% 
   
@@ -349,14 +351,57 @@ check_forecast <- refit_models %>%
   use_series(check) %>% 
   
   any()
-
-while(check_forecast) {
   
-  forecast <- refit_models %>% 
-    
-    mutate(
-      x = 1
-    )
-  check_forecast = FALSE
+  return(check)
+  
 }
+
+final <- refit_models
+
+while(check_forecast(final)) {
+
+final <- final %>% 
+  
+  mutate(
+    pred = map2(fitted_recipe, data_extended, ~ bake(.x, .y) %>% slice_tail(n = 1)),
+    pred = map(pred, ~ .x %>% filter(is.na(value)) %>% select(-value)),
+    pred = map2(fitted_model, pred, ~ predict(.x, new_data = .y)),
+    pred = map2(data_forecast, pred, 
+                ~ .x %>% filter(is.na(value)) %>% 
+                  mutate(value = if_else(date == min(date), 
+                                         .y %>% use_series(.pred),
+                                         value))),
+    data_forecast = map2(data_forecast, pred, ~ .x %>% rows_update(.y, by = "date")),
+    data_extended = map2(data_extended, pred, ~ .x %>% rows_update(.y, by = "date"))
+    ) 
+}
+  
+final <- final %>% 
+  select(variable,
+         data,
+         data_forecast)
+
+head(final)
 ```
+
+```{r, chart-forecast}
+plot_final <- final %>% 
+  
+  select(-data_forecast) %>% 
+  
+  unnest(data) %>% 
+  
+  mutate(data = "past") %>% 
+  
+  bind_rows(final %>% 
+              select(-data) %>% 
+              unnest(data_forecast) %>% 
+              mutate(data = "future")) 
+
+plot_final %>% 
+  
+  ggplot(aes(x = date, y = value, color = data)) +
+    geom_line() +
+    facet_grid(. ~ variable)
+```
+
