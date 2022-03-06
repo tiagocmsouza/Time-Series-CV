@@ -83,7 +83,7 @@ data %>%
 Here we define a set of models and the names of their respective recipes. What defines one specification is a pair model-recipe. 
 
 ```{r def-models}
-source("basic_workflows.R")
+source("src/basic_workflows.R")
 
 models_def <- tribble(
   ~model_id, ~recipe_id,
