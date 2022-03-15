@@ -20,3 +20,20 @@ f_create_recipe <- function(data, recipe_id) {
   return(get(recipe_id))
   
 }
+
+f_models_components <- function(models_def, data_splits) {
+  
+  models_components <- models_def %>% 
+    
+    expand_grid(data_splits) %>% 
+    
+    mutate(
+      recipe = map2(split, recipe_id, ~ f_create_recipe(.x, .y)),
+      workflow = map2(workflow, recipe, ~ .x %>% add_recipe(.y))
+    ) %>% 
+    
+    select(-recipe)
+  
+  return(models_components)
+  
+}

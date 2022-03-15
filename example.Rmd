@@ -1,7 +1,7 @@
 ---
 title: "Time Series CV"
 author: "Tiago Souza"
-date: "3/14/2022"
+date: "1/31/2022"
 output: html_document
 ---
 
@@ -19,7 +19,17 @@ library(timetk)
 
 ## Step 0: Parameters
 ```{r}
-source("src/params.R")
+# Number of periods to forecast
+forecast_length <- 20 
+# Number of periods in test sample
+test_size <- 24
+# Initial number of periods included in a split
+initial_periods <- 36
+# Lags
+lag_vec <- c(1,12)
+lag_max <- max(lag_vec)
+# Number of splits in output
+splits_number <- 10
 
 ```
 
@@ -73,21 +83,19 @@ data %>%
 Here we define a set of models and the names of their respective recipes. What defines one specification is a pair model-recipe. 
 
 ```{r def-models}
-source("src/models_parsnip.R")
+lm <- workflow() %>% 
+    add_model(
+      linear_reg() %>% 
+        set_engine("lm")
+    )
 
 models_def <- tribble(
-  ~model_id, ~recipe_id,
-  "lm", "recipe_primary",
-  "xgb", "recipe_primary",
-  "rf", "recipe_primary",
-  "svm", "recipe_primary",
-  "lm", "recipe_lag",
-  "xgb", "recipe_lag",
-  "rf", "recipe_lag",
-  "svm", "recipe_lag"
-) %>% 
-  
-  mutate(workflow = map(model_id, ~get(.x)))
+    ~model_id, ~recipe_id,
+    "lm", "recipe_primary",
+    "lm", "recipe_lag",
+  ) %>% 
+    
+    mutate(workflow = map(model_id, ~get(.x)))
 
 head(models_def)
 
@@ -96,6 +104,15 @@ head(models_def)
 ## Step 3: Split Data - train/test
 
 Now we define train and test samples based on one year and create a data frame to store forecasts.
+
+To clarify:
+
+  * **data**: complete set of data
+  * **data_train**: subset of 'data' to proceed with estimation via cross-validation
+  * **data_test**: subset 'data' to test performance at the end
+  * **data_extended**: original 'data' with the future periods appended at the end
+  * **data_future**: just the future periods
+  
 ```{r, data-split}
 data_complete <- data %>% 
   
@@ -253,12 +270,12 @@ The metric of choice will be "MAE".
 ```{r, best-model}
 best_model <- error_metrics %>% 
   
-  filter(.metric == "mae") %>% 
-  
-  group_by(variable) %>% 
-  
-  filter(mean_error == min(mean_error)) %>% 
-  
+  filter(.metric == "mae") %>%
+
+  group_by(variable) %>%
+
+  filter(mean_error == min(mean_error)) %>%
+
   select(variable, model_id, recipe_id)
 
 head(best_model)
@@ -279,9 +296,9 @@ refit_models <- best_model %>%
     fit = map2(workflow, data_train, ~ fit(.x, data = .y)),
     fitted_recipe = map(fit, ~ extract_recipe(.x)),
     fitted_model = map(fit, ~ extract_fit_parsnip(.x))
-  ) %>% 
+  ) %>%
   
-  ungroup()
+  ungroup() 
 
 head(refit_models)
 ```
