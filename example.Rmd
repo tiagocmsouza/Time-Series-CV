@@ -18,7 +18,7 @@ library(timetk)
 ```
 
 ## Step 0: Parameters
-```{r}
+```{r, parameters}
 # Number of periods to forecast
 forecast_length <- 20 
 # Number of periods in test sample
