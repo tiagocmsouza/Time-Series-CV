@@ -29,7 +29,19 @@ source("src/datasets.R")
 data_complete <- f_data_complete(data)
 data_splits <- f_data_splits(data_complete)
 
-# Step 5: Recipes ----
+# Step 4: Recipes ----
 source("src/recipes.R")
 
 models_components <- f_models_components(models_def, data_splits)
+
+# Step 5: Fit models / Data for Calibration ----
+source("src/fit_calibrate.R")
+
+models_fitted <- f_models_fitted(models_components)
+data_calibr <- f_data_calibr(models_fitted)
+
+# Step 6: Best model ----
+source("src/best_model.R")
+
+error_metrics <- f_error_metrics(data_calibr)
+best_model <- f_best_model(error_metrics, chosen_metric)

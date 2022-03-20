@@ -11,3 +11,5 @@ lag_vec <- c(1,12)
 lag_max <- max(lag_vec)
 # Number of splits in output
 splits_number <- 10
+# Error metric
+chosen_metric <- "mae"
