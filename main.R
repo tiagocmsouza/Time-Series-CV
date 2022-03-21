@@ -45,3 +45,14 @@ source("src/best_model.R")
 
 error_metrics <- f_error_metrics(data_calibr)
 best_model <- f_best_model(error_metrics, chosen_metric)
+
+# Step 7: Refit and Performance on Test data ----
+source("src/refit_perform.R")
+
+refit_models <- f_refit_models(best_model, models_def, data_complete)
+data_perform <- f_data_perform(refit_models)
+
+# Step 8: Forecasts ----
+source("src/forecasts.R")
+
+forecasts <- f_forecasts(refit_models)
