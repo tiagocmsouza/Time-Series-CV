@@ -25,9 +25,6 @@ forecast_length <- 20
 test_size <- 24
 # Initial number of periods included in a split
 initial_periods <- 36
-# Lags
-lag_vec <- c(1,12)
-lag_max <- max(lag_vec)
 # Number of splits in output
 splits_number <- 10
 
@@ -83,19 +80,41 @@ data %>%
 Here we define a set of models and the names of their respective recipes. What defines one specification is a pair model-recipe. 
 
 ```{r def-models}
-lm <- workflow() %>% 
-    add_model(
-      linear_reg() %>% 
-        set_engine("lm")
-    )
 
-models_def <- tribble(
-    ~model_id, ~recipe_id,
-    "lm", "recipe_primary",
-    "lm", "recipe_lag",
-  ) %>% 
+seasonal_per <- timetk::tk_get_frequency(data %>% 
+                                           filter(variable == "manufacturing") %>% 
+                                           pull(date),
+                                         period = "auto",
+                                         message = FALSE)
+
+define_model <- function(p, d, q, P, D, Q, seasonal_per = seasonal_per){
     
-    mutate(workflow = map(model_id, ~get(.x)))
+    model <- modeltime::arima_reg(
+      seasonal_period = seasonal_per,
+      non_seasonal_ar = p,
+      non_seasonal_differences = d,
+      non_seasonal_ma = q,
+      seasonal_ar = P,
+      seasonal_differences = D,
+      seasonal_ma = Q
+    ) %>% 
+      
+      set_engine("arima") %>% 
+      
+      return(model)
+    
+  }
+  
+  grid_arima <- expand_grid(p = 0:4,
+                            d = 0,
+                            q = 0:1,
+                            P = 0,
+                            D = 0,
+                            Q = 0)
+  
+  models_def <- grid_arima %>% 
+    
+    mutate(model_arima = pmap(list(p,d,q,P,D,Q), define_model))
 
 head(models_def)
 
@@ -114,6 +133,7 @@ To clarify:
   * **data_future**: just the future periods
   
 ```{r, data-split}
+# Worked on both
 data_complete <- data %>% 
   
   group_nest(variable) %>% 
@@ -128,7 +148,7 @@ data_complete <- data %>%
                                       slice = 1)),
     data_train = map(data_split, ~ .x %>% training()),
     data_test = map(data_split, ~ .x %>% testing()),
-    data_extended = map(data, ~ .x %>% future_frame(
+    data_extended = map(data, ~ .x %>% timetk::future_frame(
                                         .date_var = date,
                                         .length_out = forecast_length,
                                         .bind_data = TRUE)),
@@ -145,6 +165,7 @@ print(data_complete)
 
 Remember that a recipe is defined by an equation and a data set. Hence, before creating recipes, we must split the training data.
 ```{r, data-cv}
+# Worked on both
 data_splits <- data_complete %>% 
   
   transmute(
@@ -165,35 +186,6 @@ data_splits <- data_complete %>%
 head(data_splits)
 ```
 
-## Step 5: Recipes
-
-Since a recipe is defined by a model and a data set, we define a function that will receive each component of a recipe and create it.
-
-We create 2 examples of recipes, based on a fixed column name with data ("value") and a fixed specification of lag structure (lag 1 and 12). Notice that the column "date" must be removed from the data in order to run.
-
-```{r, recipes}
-create_recipe <- function(data, recipe_id) {
-  
-  data <- tryCatch(training(data), 
-                   error = function(e) data)
-  
-  recipe_primary <- recipe(value ~ ., data = data) %>% 
-                      step_mutate(month = as_factor(month(date))) %>% 
-                      step_dummy(month, one_hot = FALSE) %>% 
-                      step_rm(date)
-  
-  recipe_lag <- recipe(value ~ ., data = data) %>% 
-                      step_mutate(month = as_factor(month(date))) %>% 
-                      step_dummy(month, one_hot = FALSE) %>% 
-                      step_lag(value, lag = lag_vec) %>% 
-                      step_naomit(all_predictors()) %>% 
-                      step_rm(date)
-  
-  return(get(recipe_id))
-  
-}
-```
-
 ## Step 5: Complete tibble with all components
 
 ```{r, models-components}
@@ -202,8 +194,10 @@ models_components <- models_def %>%
   expand_grid(data_splits) %>% 
   
   mutate(
-    recipe = map2(split, recipe_id, ~ create_recipe(.x, .y)),
-    workflow = map2(workflow, recipe, ~ .x %>% add_recipe(.y))
+    recipe = map(split, ~ recipe(value ~ date, data = training(.x))),
+    workflow = map2(model_arima, recipe, ~ workflow() %>% 
+                                            add_model(.x) %>% 
+                                            add_recipe(.y))
     ) %>% 
   
   select(-recipe)
