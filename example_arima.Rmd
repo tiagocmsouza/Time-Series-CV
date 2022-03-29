@@ -15,6 +15,7 @@ library(magrittr)
 
 library(httr)
 library(timetk)
+library(modeltime)
 ```
 
 ## Step 0: Parameters
@@ -114,7 +115,9 @@ define_model <- function(p, d, q, P, D, Q, seasonal_per = seasonal_per){
   
   models_def <- grid_arima %>% 
     
-    mutate(model_arima = pmap(list(p,d,q,P,D,Q), define_model))
+    mutate(model_arima = pmap(list(p,d,q,P,D,Q, seasonal_per), define_model)) %>% 
+    
+    unite("model_id", p:Q, sep = ".")
 
 head(models_def)
 
@@ -133,7 +136,7 @@ To clarify:
   * **data_future**: just the future periods
   
 ```{r, data-split}
-# Worked on both
+# Worked on both - no lagmax
 data_complete <- data %>% 
   
   group_nest(variable) %>% 
@@ -143,7 +146,6 @@ data_complete <- data %>%
                                       date_var = date,
                                       initial = initial_periods,
                                       assess = test_size,
-                                      lag = lag_max,
                                       cumulative = TRUE,
                                       slice = 1)),
     data_train = map(data_split, ~ .x %>% training()),
@@ -165,7 +167,7 @@ print(data_complete)
 
 Remember that a recipe is defined by an equation and a data set. Hence, before creating recipes, we must split the training data.
 ```{r, data-cv}
-# Worked on both
+# Worked on both - no lagmax
 data_splits <- data_complete %>% 
   
   transmute(
@@ -174,7 +176,6 @@ data_splits <- data_complete %>%
                                       date_var = date,
                                       initial = initial_periods,
                                       assess = forecast_length,
-                                      lag = lag_max,
                                       cumulative = TRUE,
                                       slice_limit = splits_number))) %>% 
   
@@ -209,16 +210,21 @@ head(models_components)
 
 ```{r, models-fit, cache=TRUE}
 models_fitted <- models_components %>% 
+
   
-  mutate(fit = map2(workflow, split, ~ fit(.x, data = training(.y)))) %>% 
+  mutate(fit = map2(workflow, split, ~ tryCatch(.x %>% fit(data = training(.y)),
+                                                error = function(error) NA))) %>%
   
-  select(-workflow)
+  select(-workflow) %>% 
+  
+  filter(!is.na(fit))
 
 head(models_fitted)
 ```
 ## Step 7: Calibrated data for test sample
 
 ```{r, data-calibr}
+# Worked on both
 data_calibr <- models_fitted %>% 
   
   mutate(
@@ -233,7 +239,6 @@ data_calibr <- models_fitted %>%
   
   select(variable,
          model_id,
-         recipe_id,
          split_id,
          data) %>% 
   
@@ -241,6 +246,30 @@ data_calibr <- models_fitted %>%
 
 head(data_calibr)
 ```
+
+```{r, test}
+test <- models_fitted %>% 
+  mutate(
+    modeltime_tbl = map(fit, ~ modeltime_table(.x)),
+    model_calib = map2(modeltime_tbl, split,
+                       ~ modeltime_calibrate(.x, testing(.y))), 
+    resid = map(model_calib, 
+                ~ pull(.x, .calibration_data) %>% 
+                  extract2(1) %>% 
+                  select(.residuals))
+  ) %>% 
+  
+  select(
+    variable,
+    model_id,
+    split_id,
+    resid) %>% 
+  
+  unnest(resid)
+
+head(test)
+```
+
 ## Step 8: Error metrics
 
 ```{r, forecast-errors}
