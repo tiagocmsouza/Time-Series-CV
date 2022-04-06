@@ -15,6 +15,7 @@ library(magrittr)
 
 library(httr)
 library(timetk)
+library(modeltime)
 ```
 
 ## Step 0: Parameters
@@ -30,6 +31,12 @@ lag_vec <- c(1,12)
 lag_max <- max(lag_vec)
 # Number of splits in output
 splits_number <- 10
+# Metrics
+multi_metric <- metric_set(rmse, mae, mape) # Problem with rsq()
+# Chosen metric
+metric_chosen <- "mae"
+# Number of models to average
+n_models_avg <- 1
 
 ```
 
@@ -128,7 +135,7 @@ data_complete <- data %>%
                                       slice = 1)),
     data_train = map(data_split, ~ .x %>% training()),
     data_test = map(data_split, ~ .x %>% testing()),
-    data_extended = map(data, ~ .x %>% future_frame(
+    data_extended = map(data, ~ .x %>% timetk::future_frame(
                                         .date_var = date,
                                         .length_out = forecast_length,
                                         .bind_data = TRUE)),
@@ -194,7 +201,7 @@ create_recipe <- function(data, recipe_id) {
 }
 ```
 
-## Step 5: Complete tibble with all components
+## Step 6: Complete tibble with all components
 
 ```{r, models-components}
 models_components <- models_def %>% 
@@ -211,18 +218,21 @@ models_components <- models_def %>%
 head(models_components)
 ```
 
-## Step 6: Fitting models to all splits
+## Step 7: Fitting models to all splits
 
-```{r, models-fit, cache=TRUE}
+```{r, models-fit, cache=FALSE}
 models_fitted <- models_components %>% 
   
-  mutate(fit = map2(workflow, split, ~ fit(.x, data = training(.y)))) %>% 
+  mutate(fit = map2(workflow, split, ~ tryCatch(fit(.x, data = training(.y)),
+                                                error = function(error) NA))) %>%
   
-  select(-workflow)
+  select(-workflow) %>% 
+  
+  filter(!is.na(fit))
 
 head(models_fitted)
 ```
-## Step 7: Calibrated data for test sample
+## Step 8: Calibrated data for test sample
 
 ```{r, data-calibr}
 data_calibr <- models_fitted %>% 
@@ -247,14 +257,14 @@ data_calibr <- models_fitted %>%
 
 head(data_calibr)
 ```
-## Step 8: Error metrics
+## Step 9: Error metrics
 
 ```{r, forecast-errors}
 error_metrics <- data_calibr %>% 
   
   group_by(variable, model_id, recipe_id, split_id) %>% 
   
-  metrics(value, .pred) %>% 
+  multi_metric(value, .pred) %>% 
   
   group_by(variable, model_id, recipe_id, .metric) %>% 
   
@@ -263,25 +273,25 @@ error_metrics <- data_calibr %>%
 head(error_metrics)
 ```
 
-## Step 9: Best model
+## Step 10: Best model
 
 The metric of choice will be "MAE".
 
 ```{r, best-model}
 best_model <- error_metrics %>% 
   
-  filter(.metric == "mae") %>%
+  filter(.metric == metric_chosen) %>%
 
   group_by(variable) %>%
 
-  filter(mean_error == min(mean_error)) %>%
+  slice_min(mean_error, n = n_models_avg) %>%
 
   select(variable, model_id, recipe_id)
 
 head(best_model)
 ```
 
-## Step 10: Refit best models
+## Step 11: Refit best models
 
 ```{r, refit-models}
 refit_models <- best_model %>% 
@@ -303,7 +313,7 @@ refit_models <- best_model %>%
 head(refit_models)
 ```
 
-## Step 11: Performance with respect to test data
+## Step 12: Performance with respect to test data
 
 ```{r, performance-test}
 data_perf <- refit_models %>% 
@@ -317,7 +327,11 @@ data_perf <- refit_models %>%
     data_test = map2(fitted_recipe, data_test, ~ bake(.x, .y)),
     pred = map2(fitted_model, data_test, ~ predict(.x, new_data = .y %>% select(-value))),
     across(c(data_test, pred), ~ map(.x, function(x) slice_tail(x, n = forecast_length))),
-    data_test = map2(data_test, pred, ~ .x %>% select(value) %>%  bind_cols(.y))
+    data_test = map2(data_test, pred, 
+                     ~ .x %>% 
+                       select(value) %>%  
+                       bind_cols(.y) %>% 
+                       mutate(horizon = row_number()))
   ) %>% 
   
   select(
@@ -325,7 +339,15 @@ data_perf <- refit_models %>%
     data_test
   ) %>% 
   
-  unnest(data_test)
+  unnest(data_test) %>% 
+  
+  group_by(variable, horizon) %>% 
+  
+  summarize(
+    value = mean(value),
+    .pred = mean(.pred),
+    .groups = "drop"
+  )
 
 head(data_perf)
 ```
@@ -339,7 +361,7 @@ data_perf %>%
 ```
 
 
-## Step 11: Forecasts
+## Step 13: Forecasts
 
 Now we turn to forecasting the future, and for that we will need a recursive approach. This is needed since to forecast $n$ periods ahead, given the existence of lag variables in the models, it is needed to have the forecast for the $n-1$ previous periods.
 
@@ -390,6 +412,7 @@ final <- final %>%
 
 head(final)
 ```
+
 
 ```{r, chart-forecast}
 plot_final <- final %>% 

@@ -28,6 +28,14 @@ test_size <- 24
 initial_periods <- 36
 # Number of splits in output
 splits_number <- 10
+# Parameter used not in arima models, set to 0 here
+lag_max <- 0
+# Metrics
+multi_metric <- metric_set(rmse, mae, mape) # Problem with rsq()
+# Chosen metric
+metric_chosen <- "mae"
+# Number of models to average
+n_models_avg <- 5
 
 ```
 
@@ -88,7 +96,18 @@ seasonal_per <- timetk::tk_get_frequency(data %>%
                                          period = "auto",
                                          message = FALSE)
 
-define_model <- function(p, d, q, P, D, Q, seasonal_per = seasonal_per){
+define_model <- function(model_id, seasonal_per = seasonal_per){
+    
+    model_id <- str_split(model_id, "\\.") %>% 
+      extract2(1) %>% 
+      as.numeric()
+    
+    p <- model_id[1]
+    d <- model_id[2]
+    q <- model_id[3]
+    P <- model_id[4]
+    D <- model_id[5]
+    Q <- model_id[6]
     
     model <- modeltime::arima_reg(
       seasonal_period = seasonal_per,
@@ -100,7 +119,7 @@ define_model <- function(p, d, q, P, D, Q, seasonal_per = seasonal_per){
       seasonal_ma = Q
     ) %>% 
       
-      set_engine("arima") %>% 
+      set_engine("arima")
       
       return(model)
     
@@ -111,13 +130,17 @@ define_model <- function(p, d, q, P, D, Q, seasonal_per = seasonal_per){
                             q = 0:1,
                             P = 0,
                             D = 0,
-                            Q = 0)
+                            Q = 0) %>% 
+    unite("model_id", p:Q, sep = ".")
   
   models_def <- grid_arima %>% 
     
-    mutate(model_arima = pmap(list(p,d,q,P,D,Q, seasonal_per), define_model)) %>% 
-    
-    unite("model_id", p:Q, sep = ".")
+    mutate(
+      recipe_id = "recipe_arima",
+      workflow = map(model_id, ~ 
+                       workflow() %>% 
+                       add_model(define_model(.x,seasonal_per)))
+      )
 
 head(models_def)
 
@@ -136,7 +159,6 @@ To clarify:
   * **data_future**: just the future periods
   
 ```{r, data-split}
-# Worked on both - no lagmax
 data_complete <- data %>% 
   
   group_nest(variable) %>% 
@@ -146,6 +168,7 @@ data_complete <- data %>%
                                       date_var = date,
                                       initial = initial_periods,
                                       assess = test_size,
+                                      lag = lag_max,
                                       cumulative = TRUE,
                                       slice = 1)),
     data_train = map(data_split, ~ .x %>% training()),
@@ -167,7 +190,6 @@ print(data_complete)
 
 Remember that a recipe is defined by an equation and a data set. Hence, before creating recipes, we must split the training data.
 ```{r, data-cv}
-# Worked on both - no lagmax
 data_splits <- data_complete %>% 
   
   transmute(
@@ -176,6 +198,7 @@ data_splits <- data_complete %>%
                                       date_var = date,
                                       initial = initial_periods,
                                       assess = forecast_length,
+                                      lag = lag_max,
                                       cumulative = TRUE,
                                       slice_limit = splits_number))) %>% 
   
@@ -187,7 +210,24 @@ data_splits <- data_complete %>%
 head(data_splits)
 ```
 
-## Step 5: Complete tibble with all components
+## Step 5: Recipes
+
+Since a recipe is defined by a model and a data set, we define a function that will receive each component of a recipe and create it.
+
+```{r, recipes}
+create_recipe <- function(data, recipe_id) {
+  
+  data <- tryCatch(training(data), 
+                   error = function(e) data)
+  
+  recipe_arima <- recipe(value ~ date, data = data)
+  
+  return(get(recipe_id))
+  
+}
+```
+
+## Step 6: Complete tibble with all components
 
 ```{r, models-components}
 models_components <- models_def %>% 
@@ -195,10 +235,8 @@ models_components <- models_def %>%
   expand_grid(data_splits) %>% 
   
   mutate(
-    recipe = map(split, ~ recipe(value ~ date, data = training(.x))),
-    workflow = map2(model_arima, recipe, ~ workflow() %>% 
-                                            add_model(.x) %>% 
-                                            add_recipe(.y))
+    recipe = map2(split, recipe_id, ~ create_recipe(.x, .y)),
+    workflow = map2(workflow, recipe, ~ .x %>% add_recipe(.y))
     ) %>% 
   
   select(-recipe)
@@ -206,13 +244,12 @@ models_components <- models_def %>%
 head(models_components)
 ```
 
-## Step 6: Fitting models to all splits
+## Step 7: Fitting models to all splits
 
 ```{r, models-fit, cache=TRUE}
 models_fitted <- models_components %>% 
 
-  
-  mutate(fit = map2(workflow, split, ~ tryCatch(.x %>% fit(data = training(.y)),
+  mutate(fit = map2(workflow, split, ~ tryCatch(fit(.x, data = training(.y)),
                                                 error = function(error) NA))) %>%
   
   select(-workflow) %>% 
@@ -221,10 +258,9 @@ models_fitted <- models_components %>%
 
 head(models_fitted)
 ```
-## Step 7: Calibrated data for test sample
+## Step 8: Calibrated data for test sample
 
 ```{r, data-calibr}
-# Worked on both
 data_calibr <- models_fitted %>% 
   
   mutate(
@@ -235,49 +271,27 @@ data_calibr <- models_fitted %>%
     pred = map2(fitted_model, data_test, ~ predict(.x, new_data = .y %>% select(-value))),
     across(c(data, pred), ~ map(.x, function(x) slice_tail(x, n = forecast_length))),
     data = map2(data, pred, ~ .x %>% bind_cols(.y))
-  ) %>% 
-  
+  ) %>%
+
   select(variable,
          model_id,
+         recipe_id,
          split_id,
-         data) %>% 
-  
+         data) %>%
+
   unnest(data)
 
 head(data_calibr)
 ```
 
-```{r, test}
-test <- models_fitted %>% 
-  mutate(
-    modeltime_tbl = map(fit, ~ modeltime_table(.x)),
-    model_calib = map2(modeltime_tbl, split,
-                       ~ modeltime_calibrate(.x, testing(.y))), 
-    resid = map(model_calib, 
-                ~ pull(.x, .calibration_data) %>% 
-                  extract2(1) %>% 
-                  select(.residuals))
-  ) %>% 
-  
-  select(
-    variable,
-    model_id,
-    split_id,
-    resid) %>% 
-  
-  unnest(resid)
-
-head(test)
-```
-
-## Step 8: Error metrics
+## Step 9: Error metrics
 
 ```{r, forecast-errors}
 error_metrics <- data_calibr %>% 
   
   group_by(variable, model_id, recipe_id, split_id) %>% 
   
-  metrics(value, .pred) %>% 
+  multi_metric(value, .pred) %>% 
   
   group_by(variable, model_id, recipe_id, .metric) %>% 
   
@@ -286,25 +300,25 @@ error_metrics <- data_calibr %>%
 head(error_metrics)
 ```
 
-## Step 9: Best model
+## Step 10: Best model
 
 The metric of choice will be "MAE".
 
 ```{r, best-model}
 best_model <- error_metrics %>% 
   
-  filter(.metric == "mae") %>%
+  filter(.metric == metric_chosen) %>%
 
   group_by(variable) %>%
 
-  filter(mean_error == min(mean_error)) %>%
+  slice_min(mean_error, n = n_models_avg) %>%
 
   select(variable, model_id, recipe_id)
 
 head(best_model)
 ```
 
-## Step 10: Refit best models
+## Step 11: Refit best models
 
 ```{r, refit-models}
 refit_models <- best_model %>% 
@@ -326,7 +340,7 @@ refit_models <- best_model %>%
 head(refit_models)
 ```
 
-## Step 11: Performance with respect to test data
+## Step 12: Performance with respect to test data
 
 ```{r, performance-test}
 data_perf <- refit_models %>% 
@@ -338,19 +352,33 @@ data_perf <- refit_models %>%
   
   mutate(
     data_test = map2(fitted_recipe, data_test, ~ bake(.x, .y)),
-    pred = map2(fitted_model, data_test, ~ predict(.x, new_data = .y %>% select(-value))),
-    across(c(data_test, pred), ~ map(.x, function(x) slice_tail(x, n = forecast_length))),
-    data_test = map2(data_test, pred, ~ .x %>% select(value) %>%  bind_cols(.y))
-  ) %>% 
-  
-  select(
-    variable,
-    data_test
-  ) %>% 
-  
-  unnest(data_test)
+    pred = map2(fitted_model, data_test, ~ predict(.x, new_data = .y %>% select(-value))))#,
+#     across(c(data_test, pred), ~ map(.x, function(x) slice_tail(x, n = forecast_length))),
+#     data_test = map2(data_test, pred, 
+#                      ~ .x %>% 
+#                        select(value) %>%  
+#                        bind_cols(.y) %>% 
+#                        mutate(horizon = row_number()))
+#   ) %>% 
+#   
+#   select(
+#     variable,
+#     data_test
+#   ) %>% 
+#   
+#   unnest(data_test) %>% 
+#   
+#   group_by(variable, horizon) %>% 
+#   
+#   summarize(
+#     value = mean(value),
+#     .pred = mean(.pred),
+#     .groups = "drop"
+#   )
+# 
+# head(data_perf)
 
-head(data_perf)
+data_perf$pred[[10]]
 ```
 ```{r, chart-performance}
 data_perf %>% 
@@ -389,7 +417,7 @@ check_forecast <- function(df_refit) {
 final <- refit_models
 
 while(check_forecast(final)) {
-
+  
 final <- final %>% 
   
   mutate(
@@ -413,6 +441,25 @@ final <- final %>%
 
 head(final)
 ```
+```{r}
+x <- refit_models %>% 
+  
+  mutate(
+    pred = map2(fitted_recipe, data_extended, ~ bake(.x, .y) %>% slice_tail(n = 1)),
+    # pred = map(pred, ~ .x %>% filter(is.na(value)) %>% select(-value)),
+    # pred = map2(fitted_model, pred, ~ predict(.x, new_data = .y)),
+    # pred = map2(data_forecast, pred, 
+    #             ~ .x %>% filter(is.na(value)) %>% 
+    #               mutate(value = if_else(date == min(date), 
+    #                                      .y %>% use_series(.pred),
+    #                                      value))),
+    # data_forecast = map2(data_forecast, pred, ~ .x %>% rows_update(.y, by = "date")),
+    # data_extended = map2(data_extended, pred, ~ .x %>% rows_update(.y, by = "date"))
+    ) 
+
+x$pred[[1]]
+```
+
 
 ```{r, chart-forecast}
 plot_final <- final %>% 
