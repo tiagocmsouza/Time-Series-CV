@@ -406,9 +406,11 @@ final <- final %>%
 }
   
 final <- final %>% 
-  select(variable,
-         data,
-         data_forecast)
+  select(variable, 
+         data_forecast) %>%
+  unnest(data_forecast) %>% 
+  group_by(variable, date) %>% 
+  summarize(value = value)
 
 head(final)
 ```

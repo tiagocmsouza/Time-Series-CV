@@ -1,7 +1,7 @@
 ---
 title: "Time Series CV - Arima Models"
 author: "Tiago Souza"
-date: "3/31/2022"
+date: "4/25/2022"
 output: html_document
 ---
 
@@ -21,9 +21,9 @@ library(modeltime)
 ## Step 0: Parameters
 ```{r, parameters}
 # Number of periods to forecast
-forecast_length <- 20 
+forecast_length <- 6
 # Number of periods in test sample
-test_size <- 24
+test_size <- forecast_length
 # Initial number of periods included in a split
 initial_periods <- 36
 # Number of splits in output
@@ -35,7 +35,7 @@ multi_metric <- metric_set(rmse, mae, mape) # Problem with rsq()
 # Chosen metric
 metric_chosen <- "mae"
 # Number of models to average
-n_models_avg <- 5
+n_models_avg <- 3
 
 ```
 
@@ -352,41 +352,30 @@ data_perf <- refit_models %>%
   
   mutate(
     data_test = map2(fitted_recipe, data_test, ~ bake(.x, .y)),
-    pred = map2(fitted_model, data_test, ~ predict(.x, new_data = .y %>% select(-value))))#,
-#     across(c(data_test, pred), ~ map(.x, function(x) slice_tail(x, n = forecast_length))),
-#     data_test = map2(data_test, pred, 
-#                      ~ .x %>% 
-#                        select(value) %>%  
-#                        bind_cols(.y) %>% 
-#                        mutate(horizon = row_number()))
-#   ) %>% 
-#   
-#   select(
-#     variable,
-#     data_test
-#   ) %>% 
-#   
-#   unnest(data_test) %>% 
-#   
-#   group_by(variable, horizon) %>% 
-#   
-#   summarize(
-#     value = mean(value),
-#     .pred = mean(.pred),
-#     .groups = "drop"
-#   )
-# 
-# head(data_perf)
+    pred = map2(fitted_model, data_test, ~ predict(.x, new_data = .y)),
+    data_test = map2(data_test, pred,
+                     ~ .x %>%
+                       select(value) %>%
+                       bind_cols(.y) %>%
+                       mutate(horizon = row_number()))
+  ) %>%
 
-data_perf$pred[[10]]
-```
-```{r, chart-performance}
-data_perf %>% 
-  
-  ggplot(aes(x=value, y=.pred))+
-    geom_point()+ 
-    geom_smooth(method = "lm", formula = y ~ x)+
-    facet_grid(variable ~ .)
+  select(
+    variable,
+    data_test
+  ) %>%
+
+  unnest(data_test) %>%
+
+  group_by(variable, horizon) %>%
+
+  summarize(
+    value = mean(value),
+    .pred = mean(.pred),
+    .groups = "drop"
+  )
+
+head(data_perf)
 ```
 
 
@@ -395,71 +384,47 @@ data_perf %>%
 Now we turn to forecasting the future, and for that we will need a recursive approach. This is needed since to forecast $n$ periods ahead, given the existence of lag variables in the models, it is needed to have the forecast for the $n-1$ previous periods.
 
 ```{r, forecasts}
-check_forecast <- function(df_refit) {
   
-  check <- df_refit %>% 
-  
-  select(data_forecast) %>% 
-  
-  transmute(check = map(data_forecast, ~ .x %>% 
-                       select(value) %>% 
-                       anyNA()),
-            check = as.logical(check)) %>% 
-  
-  use_series(check) %>% 
-  
-  any()
-  
-  return(check)
-  
-}
-
-final <- refit_models
-
-while(check_forecast(final)) {
-  
-final <- final %>% 
+final <- refit_models %>% 
   
   mutate(
-    pred = map2(fitted_recipe, data_extended, ~ bake(.x, .y) %>% slice_tail(n = 1)),
-    pred = map(pred, ~ .x %>% filter(is.na(value)) %>% select(-value)),
-    pred = map2(fitted_model, pred, ~ predict(.x, new_data = .y)),
-    pred = map2(data_forecast, pred, 
-                ~ .x %>% filter(is.na(value)) %>% 
-                  mutate(value = if_else(date == min(date), 
-                                         .y %>% use_series(.pred),
-                                         value))),
+    pred = map2(fitted_recipe, data_extended, ~ bake(.x, .y)),
+    pred = map(pred, ~ .x %>%
+                          filter(is.na(value)) %>%
+                          select(-value)),
+    pred = map2(fitted_model, pred, ~ predict(.x, new_data = .y) %>% rename(value = .pred)),
+    pred = map2(data_forecast, pred,
+                         ~ .x %>%
+                           select(-value) %>%
+                           bind_cols(.y)),
     data_forecast = map2(data_forecast, pred, ~ .x %>% rows_update(.y, by = "date")),
     data_extended = map2(data_extended, pred, ~ .x %>% rows_update(.y, by = "date"))
-    ) 
-}
+    ) %>% 
   
-final <- final %>% 
   select(variable,
-         data,
          data_forecast)
+
+final <- final %>% 
+  
+  select(variable, 
+         data_forecast) %>%
+  
+  unnest(data_forecast) %>% 
+  
+  group_by(variable, date) %>% 
+  
+  summarize(value = value, 
+            .groups = "drop")
+
+final <- final %>% 
+  
+  group_nest(variable, .key = "data_forecast") %>% 
+  
+  left_join(data_complete %>% 
+              select(variable, data), by = "variable")
 
 head(final)
 ```
-```{r}
-x <- refit_models %>% 
-  
-  mutate(
-    pred = map2(fitted_recipe, data_extended, ~ bake(.x, .y) %>% slice_tail(n = 1)),
-    # pred = map(pred, ~ .x %>% filter(is.na(value)) %>% select(-value)),
-    # pred = map2(fitted_model, pred, ~ predict(.x, new_data = .y)),
-    # pred = map2(data_forecast, pred, 
-    #             ~ .x %>% filter(is.na(value)) %>% 
-    #               mutate(value = if_else(date == min(date), 
-    #                                      .y %>% use_series(.pred),
-    #                                      value))),
-    # data_forecast = map2(data_forecast, pred, ~ .x %>% rows_update(.y, by = "date")),
-    # data_extended = map2(data_extended, pred, ~ .x %>% rows_update(.y, by = "date"))
-    ) 
-
-x$pred[[1]]
-```
-
 
 ```{r, chart-forecast}
 plot_final <- final %>% 
@@ -479,6 +444,6 @@ plot_final %>%
   
   ggplot(aes(x = date, y = value, color = data)) +
     geom_line() +
-    facet_grid(. ~ variable)
+    facet_grid(variable ~ .)
 ```
 
